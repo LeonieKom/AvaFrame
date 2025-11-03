@@ -41,6 +41,7 @@ def initiateLogger(targetDir, logName="runLog", modelInfo=""):
     log : logging object
 
     """
+    import os
 
     # datetime object containing current date and time
     now = datetime.now()
@@ -65,6 +66,21 @@ def initiateLogger(targetDir, logName="runLog", modelInfo=""):
         disable_existing_loggers=False,
     )
     log = logging.getLogger("avaframe")
+    
+    # ALARM PIPELINE MODIFICATION: Respect external logging level
+    # Check if AVAFRAME_LOG_LEVEL environment variable is set
+    external_level = os.environ.get('AVAFRAME_LOG_LEVEL')
+    if external_level:
+        try:
+            level = getattr(logging, external_level.upper())
+            log.setLevel(level)
+            # Also set console handler level
+            for handler in log.handlers:
+                if isinstance(handler, logging.StreamHandler) and handler.stream.name == '<stdout>':
+                    handler.setLevel(level)
+            log.debug(f"AvaFrame logging level set to {external_level.upper()} from environment")
+        except AttributeError:
+            log.warning(f"Invalid AVAFRAME_LOG_LEVEL: {external_level}, using default INFO")
 
     log.info("Started logging at: %s", dtString)
     log.info("Also logging to: %s", logFileName)
