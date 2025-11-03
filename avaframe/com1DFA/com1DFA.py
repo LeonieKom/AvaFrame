@@ -2194,7 +2194,7 @@ def DFAIterate(cfg, particles, fields, dem, inputSimLines, outDir, cuSimName, si
         countParticleCsv = countParticleCsv + 1
 
     if particles["nExitedParticles"] != 0.0:
-        log.warning(
+        log.debug(
             "%d particles have been removed during simulation because they exited the domain"
             % particles["nExitedParticles"]
         )
