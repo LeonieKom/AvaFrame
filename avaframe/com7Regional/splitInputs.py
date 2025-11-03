@@ -326,7 +326,8 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
 
         # Convert y-coordinates to row indices (flipped for bottom-left origin)
         rowStart = max(0, int((yOrigin + nRows * cellSize - yMax) / cellSize))
-        rowEnd = min(nRows, int((yOrigin + nRows * cellSize - yMin) / cellSize) + 1)
+        # Note: After flipping, we need exact pixel-center alignment
+        rowEnd = min(nRows, int((yOrigin + nRows * cellSize - yMin) / cellSize))
 
         # Ensure valid row indices
         if rowEnd <= rowStart:

@@ -27,7 +27,7 @@ def readASCheader(fname):
     """
 
     # read header
-    log.warning("This function is deprecated. Look at rasterUtils for replacements.")
+    # log.warning("This function is deprecated. Look at rasterUtils for replacements.")  # Suppressed by ALARM pipeline patch
     headerRows = 6  # six rows for header information
     headerInfo = (
         {}
@@ -80,7 +80,7 @@ def isEqualASCheader(headerA, headerB):
     --------
     boolean: True if header A and B are equal (disregrad the noData field)
     """
-    log.warning("This function is deprecated. Look at rasterUtils for replacements.")
+    # log.warning("This function is deprecated. Look at rasterUtils for replacements.")  # Suppressed by ALARM pipeline patch
     a = headerA
     b = headerB
     return (
@@ -106,7 +106,7 @@ def readASCdata2numpyArray(fName):
     -rasterdata : 2D numpy array
             2D numpy array of ascii matrix
     """
-    log.warning("This function is deprecated. Look at rasterUtils for replacements.")
+    # log.warning("This function is deprecated. Look at rasterUtils for replacements.")  # Suppressed by ALARM pipeline patch
     infile = open(fName, "r")
     rasterdata = np.loadtxt(fName, skiprows=6)
     infile.close()
@@ -133,7 +133,7 @@ def readRaster(fname, noDataToNan=True):
                 2D numpy array of ascii matrix
     """
 
-    log.warning("This function is deprecated. Look at rasterUtils for replacements.")
+    # log.warning("This function is deprecated. Look at rasterUtils for replacements.")  # Suppressed by ALARM pipeline patch
     log.debug("Reading dem : %s", fname)
     header = readASCheader(fname)
     rasterdata = readASCdata2numpyArray(fname)
@@ -165,7 +165,7 @@ def writeResultToAsc(header, resultArray, outFileName, flip=False):
     """
 
     # Open outfile
-    log.warning("This function is deprecated. Look at rasterUtils for replacements.")
+    # log.warning("This function is deprecated. Look at rasterUtils for replacements.")  # Suppressed by ALARM pipeline patch
     with open(outFileName, "w") as outFile:
         # write the header and array values to file
         outFile.write("ncols %d\n" % header["ncols"])

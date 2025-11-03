@@ -4,6 +4,7 @@ import pathlib
 import shutil
 import logging
 import numpy as np
+import numpy.ma as ma
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import avaframe.in3Utils.initializeProject as initProj
@@ -52,7 +53,7 @@ def com7RegionalMain(cfgMain, cfg):
 
     Where:
     - avalancheDir: Main directory specified in cfgMain
-    - regionalDir: Subdirectory specified in cfg['GENERAL']['regionalDir']
+    - regionalDir: Subdirectory specified in cfg['GENERAL']['regionaldir']  # Fixed: ConfigParser uses lowercase
     """
     # Define the regional directory in relation to the avalanche directory
     regionalDirFromCfg = str(cfg["GENERAL"]["regionalDir"])
@@ -104,12 +105,12 @@ def com7RegionalMain(cfgMain, cfg):
 
     # Copy/move peak files if configured
     allPeakFilesDir = None
-    if cfg["GENERAL"].getboolean("copyPeakFiles"):
+    if cfg["GENERAL"].getboolean("copypeakfiles"):
         allPeakFilesDir = moveOrCopyPeakFiles(cfg, regionalDir)
 
     # Merge output rasters if configured
     mergedRastersDir = None
-    if cfg["GENERAL"].getboolean("mergeOutput"):
+    if cfg["GENERAL"].getboolean("mergeoutput"):
         mergedRastersDir = mergeOutputRasters(cfg, regionalDir)
 
     return allPeakFilesDir, mergedRastersDir
@@ -143,7 +144,7 @@ def getTotalNumberOfSims(avaDirs, cfgMain, cfgCom7):
             com1DFA,
             fileOverride="",
             toPrint=False,
-            onlyDefault=cfgCom7["com1DFA_com1DFA_override"].getboolean("defaultConfig"),
+            onlyDefault=cfgCom7["com1DFA_com1DFA_override"].getboolean("defaultconfig")  # Fixed: ConfigParser uses lowercase,
         )
         cfgCom1DFA, _ = cfgHandling.applyCfgOverride(cfgCom1DFA, cfgCom7, com1DFA, addModValues=False)
 
@@ -196,7 +197,7 @@ def processAvaDirCom1Regional(cfgMain, cfgCom7, avalancheDir):
         com1DFA,
         fileOverride="",
         toPrint=False,
-        onlyDefault=cfgCom7["com1DFA_com1DFA_override"].getboolean("defaultConfig"),
+        onlyDefault=cfgCom7["com1DFA_com1DFA_override"].getboolean("defaultconfig")  # Fixed: ConfigParser uses lowercase,
     )
     cfgCom1DFA, cfgCom7 = cfgHandling.applyCfgOverride(cfgCom1DFA, cfgCom7, com1DFA, addModValues=False)
 
@@ -225,7 +226,7 @@ def moveOrCopyPeakFiles(cfg, avalancheDir):
     allPeakFilesDir : pathlib.Path or None
         Path to the created allPeakFiles directory or None if copyPeakFiles is False
     """
-    if not cfg["GENERAL"].getboolean("copyPeakFiles"):
+    if not cfg["GENERAL"].getboolean("copypeakfiles"):
         log.info("copyPeakFiles is False - no files will be copied or moved")
         return None, None
 
@@ -342,6 +343,15 @@ def mergeRasters(rasterFiles, bounds, mergeMethod="max"):
     mergedData, outputTransform = merge(rasterFiles, method=mergeMethod, masked=True)
 
     mergedData = np.squeeze(mergedData)
+    
+    # CRITICAL FIX: Convert masked array to regular array with consistent formatting
+    # rasterio.merge() returns masked array which causes mixed formatting (nan, 0.0, 0)
+    # GIS tools can't handle this inconsistency
+    if ma.isMaskedArray(mergedData):
+        # It's a masked array - convert to regular array with -9999 for nodata
+        mergedData = mergedData.filled(-9999.0)
+    # Ensure consistent data type for GIS compatibility
+    mergedData = mergedData.astype(np.float32, copy=False)
 
     # Calculate dimensions for merged raster; helps checking if merged raster is correct
     nCols = int((bounds["xMax"] - bounds["xMin"]) / outputTransform[0])
@@ -377,7 +387,7 @@ def mergeOutputRasters(cfg, avalancheDir):
     mergedRastersDir : pathlib.Path or None
         Path to the directory containing merged rasters or None if mergeOutput is False
     """
-    if not cfg["GENERAL"].getboolean("mergeOutput", False):
+    if not cfg["GENERAL"].getboolean("mergeoutput", False):
         log.info("mergeOutput is False - no rasters will be merged")
         return None
 
@@ -395,11 +405,11 @@ def mergeOutputRasters(cfg, avalancheDir):
     mergedRastersDir.mkdir(parents=True, exist_ok=True)
 
     # Get types to merge
-    mergeTypes = cfg["GENERAL"].get("mergeTypes").split("|")
+    mergeTypes = cfg["GENERAL"].get("mergetypes").split("|")
     log.info(f"Merging raster types: {mergeTypes}")
 
     # Get merge methods
-    mergeMethods = cfg["GENERAL"].get("mergeMethods", "max").lower().split("|")
+    mergeMethods = cfg["GENERAL"].get("mergemethods", "max").lower().split("|")
     log.info(f"Using merge methods: {mergeMethods}")
 
     # Validate merge methods
@@ -430,7 +440,9 @@ def mergeOutputRasters(cfg, avalancheDir):
         for mergeMethod in mergeMethods:
             mergedHeader, mergedData = mergeRasters(rasterFiles, bounds, mergeMethod=mergeMethod)
             outputPath = mergedRastersDir / f"merged_{rasterType}_{mergeMethod}"
-            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=False)
+            # Fix header nodata_value to match filled data (-9999)
+            mergedHeader["nodata_value"] = -9999.0
+            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=True)  # Fixed: must flip for correct ASC format
             log.info(f"Saved merged {rasterType} raster (method: {mergeMethod}) to: {outputPath}")
 
     return mergedRastersDir

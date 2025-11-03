@@ -462,7 +462,7 @@ def applyCfgOverride(cfgToOverride, cfgWithOverrideParameters, module, addModVal
     # create list with parameters that become overridden
     overrideParameters = cfgWithOverrideParameters["%s_%s_override" % (modP, modName)]
     overrideKeys = [item for item in overrideParameters]
-    overrideKeys.remove("defaultConfig")
+    overrideKeys.remove("defaultconfig")  # Fixed: ConfigParser uses lowercase
     message = "duplicate parameter names appearing in override section"
     errorDuplicateListEntry(overrideKeys, message)
 
