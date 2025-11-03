@@ -464,7 +464,7 @@ def prepareReleaseEntrainment(cfg, rel, inputSimLines):
     badName = False
     if "_" in relName:
         badName = True
-        log.warning(
+        log.debug(
             "Release area scenario file name includes an underscore \
         the suffix _AF will be added for the simulation name"
         )
