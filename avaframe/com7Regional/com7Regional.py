@@ -116,8 +116,51 @@ def com7RegionalMain(cfgMain, cfg):
     return allPeakFilesDir, mergedRastersDir
 
 
+def _getSimCountForAvaDir(args):
+    """Helper function to get simulation count for a single avalanche directory.
+    
+    This function is designed to be called in parallel via ProcessPoolExecutor.
+    
+    Parameters
+    ----------
+    args : tuple
+        Tuple containing (avaDir, cfgMainDict, cfgCom7Dict, onlyDefault)
+    
+    Returns
+    -------
+    int
+        Number of simulations for this directory, or 0 if error
+    """
+    avaDir, cfgMainDict, cfgCom7Dict, onlyDefault = args
+    
+    try:
+        # Reconstruct config objects from dictionaries
+        cfgMainCopy = cfgUtils.convertDictToConfigParser(cfgMainDict)
+        cfgMainCopy["MAIN"]["avalancheDir"] = str(avaDir)
+        
+        cfgCom7 = cfgUtils.convertDictToConfigParser(cfgCom7Dict)
+        
+        # Get com1DFA config with regional overrides
+        cfgCom1DFA = cfgUtils.getModuleConfig(
+            com1DFA,
+            fileOverride="",
+            toPrint=False,
+            onlyDefault=onlyDefault
+        )
+        cfgCom1DFA, _ = cfgHandling.applyCfgOverride(cfgCom1DFA, cfgCom7, com1DFA, addModValues=False)
+        
+        # Get simulations for this directory
+        simDict, _, _, _ = com1DFA.com1DFAPreprocess(cfgMainCopy, "cfgFromObject", cfgCom1DFA)
+        return len(simDict)
+    except Exception as e:
+        log.warning(f"Could not get simulations for {avaDir}: {e}")
+        return 0
+
+
 def getTotalNumberOfSims(avaDirs, cfgMain, cfgCom7):
     """Get total number of simulations across all avalanche directories.
+    
+    ALARM PIPELINE MODIFICATION: Parallelized for faster execution.
 
     Parameters
     ----------
@@ -133,29 +176,46 @@ def getTotalNumberOfSims(avaDirs, cfgMain, cfgCom7):
     int
         Total number of simulations
     """
+    import os
+    from tqdm import tqdm
+    
+    # Convert configs to dictionaries for serialization
+    cfgMainDict = cfgUtils.convertConfigParserToDict(cfgMain)
+    cfgCom7Dict = cfgUtils.convertConfigParserToDict(cfgCom7)
+    onlyDefault = cfgCom7["com1DFA_com1DFA_override"].getboolean("defaultconfig")
+    
+    # Prepare arguments for parallel processing
+    args_list = [(avaDir, cfgMainDict, cfgCom7Dict, onlyDefault) for avaDir in avaDirs]
+    
+    # Get number of CPUs to use
+    nCPU = cfgMain["MAIN"].get("nCPU", "auto")
+    if nCPU == "auto":
+        max_workers = None  # Use all available CPUs
+    else:
+        max_workers = int(nCPU)
+    
+    log.info(f"Counting simulations for {len(avaDirs)} avalanche directories in parallel...")
+    log.info(f"Using {max_workers if max_workers else 'all available'} CPU cores")
+    
     totalSims = 0
-    for avaDir in avaDirs:
-        # Create copies of configs to avoid modifying originals
-        cfgMainCopy = cfgUtils.convertDictToConfigParser(cfgUtils.convertConfigParserToDict(cfgMain))
-        cfgMainCopy["MAIN"]["avalancheDir"] = str(avaDir)
-
-        # Get com1DFA config with regional overrides (same as in processAvaDirCom1Regional)
-        cfgCom1DFA = cfgUtils.getModuleConfig(
-            com1DFA,
-            fileOverride="",
-            toPrint=False,
-            onlyDefault=cfgCom7["com1DFA_com1DFA_override"].getboolean("defaultconfig")  # Fixed: ConfigParser uses lowercase,
-        )
-        cfgCom1DFA, _ = cfgHandling.applyCfgOverride(cfgCom1DFA, cfgCom7, com1DFA, addModValues=False)
-
-        # Get simulations for this directory
-        try:
-            simDict, _, _, _ = com1DFA.com1DFAPreprocess(cfgMainCopy, "cfgFromObject", cfgCom1DFA)
-            totalSims += len(simDict)
-        except Exception as e:
-            log.warning(f"Could not get simulations for {avaDir}: {e}")
-            continue
-
+    
+    # Process in parallel with progress bar
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        futures = [executor.submit(_getSimCountForAvaDir, args) for args in args_list]
+        
+        # Collect results with progress bar
+        with tqdm(total=len(futures), desc="Counting sims", unit="avalanche", ncols=100) as pbar:
+            for future in as_completed(futures):
+                try:
+                    count = future.result()
+                    totalSims += count
+                    pbar.update(1)
+                except Exception as e:
+                    log.warning(f"Error getting simulation count: {e}")
+                    pbar.update(1)
+    
+    log.info(f"Total simulations to run: {totalSims}")
     return totalSims
 
 
