@@ -205,7 +205,7 @@ def getTotalNumberOfSims(avaDirs, cfgMain, cfgCom7):
         futures = [executor.submit(_getSimCountForAvaDir, args) for args in args_list]
         
         # Collect results with progress bar
-        with tqdm(total=len(futures), desc="Counting sims", unit="avalanche", ncols=100) as pbar:
+        with tqdm(total=len(futures), desc="STEP 1/3: Analyzing release areas", unit="avalanche", ncols=100) as pbar:
             for future in as_completed(futures):
                 try:
                     count = future.result()
@@ -502,7 +502,7 @@ def mergeOutputRasters(cfg, avalancheDir):
             outputPath = mergedRastersDir / f"merged_{rasterType}_{mergeMethod}"
             # Fix header nodata_value to match filled data (-9999)
             mergedHeader["nodata_value"] = -9999.0
-            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=True)  # Fixed: must flip for correct ASC format
+            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=False)  # rasterio.merge() already in correct format (North=first line)
             log.info(f"Saved merged {rasterType} raster (method: {mergeMethod}) to: {outputPath}")
 
     return mergedRastersDir
