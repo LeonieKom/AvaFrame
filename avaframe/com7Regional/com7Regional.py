@@ -502,7 +502,7 @@ def mergeOutputRasters(cfg, avalancheDir):
             outputPath = mergedRastersDir / f"merged_{rasterType}_{mergeMethod}"
             # Fix header nodata_value to match filled data (-9999)
             mergedHeader["nodata_value"] = -9999.0
-            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=False)  # rasterio.merge() already in correct format (North=first line)
+            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=True)  # CRITICAL: rasterio.merge() returns South-first, must flip to North-first for AvaFrame
             log.info(f"Saved merged {rasterType} raster (method: {mergeMethod}) to: {outputPath}")
 
     return mergedRastersDir
