@@ -5,6 +5,14 @@ import shapefile  # pyshp
 from shapely.geometry import box
 import pathlib
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
 
 from avaframe.in2Trans import rasterUtils
 from avaframe.in3Utils import fileHandlerUtils as fU
@@ -77,7 +85,12 @@ def splitInputsMain(avalancheDir, outputDir, cfg, cfgMain):
 
     # Step 2: Set up avalanche directories
     log.info("Initializing folder structure for each entry...")
-    for entry in dirListGrouped:
+    n_groups = len(dirListGrouped)
+    print(f"Creating {n_groups} avalanche directories...")
+    
+    # Use tqdm for progress bar if available
+    iterator = tqdm(dirListGrouped, desc="Creating directories", unit="dir") if HAS_TQDM else dirListGrouped
+    for entry in iterator:
         dirName = entry["dirName"]
         initializeFolderStruct(str(outputDir / dirName), removeExisting=True)
         log.debug(f"Created folder structure for '{dirName}'.")
@@ -292,9 +305,13 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
     nRows = header["nrows"]
     nCols = header["ncols"]
 
-    # Process each group
+    # Process each group with progress bar
     groupExtents = {}
-    for entry in dirList:
+    n_groups = len(dirList)
+    print(f"Clipping DEM for {n_groups} groups...")
+    
+    iterator = tqdm(dirList, desc="Clipping DEMs", unit="group") if HAS_TQDM else dirList
+    for entry in iterator:
         dirName = entry["dirName"]
         geometries = entry["geometries"]
         properties = entry["properties"]
@@ -518,8 +535,12 @@ def splitByScenarios(dirList, outputDir):
     totalInputFiles = 0
     totalScenarioFiles = 0
 
-    # Loop through each folder
-    for folder in dirList:
+    # Loop through each folder with progress bar
+    n_folders = len(dirList)
+    print(f"Splitting {n_folders} folders by scenarios...")
+    
+    iterator = tqdm(dirList, desc="Splitting scenarios", unit="folder") if HAS_TQDM else dirList
+    for folder in iterator:
         inputShp = pathlib.Path(outputDir) / folder["dirName"] / "Inputs" / "REL" / folder["dirName"]
         fields, fieldNames, properties, geometries, srs = shpConv.readShapefile(inputShp)
         totalInputFiles += 1
