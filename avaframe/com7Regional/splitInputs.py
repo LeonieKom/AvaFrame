@@ -5,8 +5,9 @@ import shapefile  # pyshp
 from shapely.geometry import box
 import pathlib
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
+import os
 
 try:
     from tqdm import tqdm
@@ -272,8 +273,39 @@ def checkFeatureIsolation(geometries, properties, bufferSize, groupName):
             raise ValueError(message)
 
 
-def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
+def _write_clipped_dem(args):
+    """Helper function to write a single clipped DEM (for parallel execution).
+    
+    Parameters
+    ----------
+    args : tuple
+        (dirName, clippedData, clippedHeader, outputDir)
+    
+    Returns
+    -------
+    tuple
+        (dirName, (xMinDEM, xMaxDEM, yMinDEM, yMaxDEM))
+    """
+    dirName, clippedData, clippedHeader, outputDir = args
+    cellSize = clippedHeader["cellsize"]
+    
+    # Write clipped DEM
+    outputDEM = outputDir / dirName / "Inputs" / f"{dirName}_DEM"
+    rasterUtils.writeResultToRaster(clippedHeader, clippedData, outputDEM, flip=True)
+    
+    # Calculate final DEM extents
+    xMinDEM = clippedHeader["xllcenter"] + (cellSize * 0.5)
+    yMinDEM = clippedHeader["yllcenter"] + (cellSize * 0.5)
+    xMaxDEM = clippedHeader["xllcenter"] + (clippedHeader["ncols"] * cellSize) - (cellSize * 0.5)
+    yMaxDEM = clippedHeader["yllcenter"] + (clippedHeader["nrows"] * cellSize) - (cellSize * 0.5)
+    
+    return (dirName, (xMinDEM, xMaxDEM, yMinDEM, yMaxDEM))
+
+
+def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_workers=None):
     """Clip the DEM to include all features in each release group. Returns an error if any feature in a group is isolated.
+    
+    Uses parallel I/O for faster processing when many groups need to be clipped.
 
     Parameters
     ----------
@@ -286,7 +318,11 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
     cfg : configparser object
         Configuration settings containing:
             - GENERAL.bufferSize : float
-                Size of buffer to add around release areas   Configuration settings
+                Size of buffer to add around release areas
+    parallel : bool, optional
+        If True, use parallel I/O for writing clipped DEMs. Default: True
+    max_workers : int, optional
+        Maximum number of parallel workers. Default: min(32, os.cpu_count() + 4)
 
     Returns
     -------
@@ -295,7 +331,7 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
         The extents are reduced by one pixel on each side to ensure DEM extents
         are larger than clip extents of other input.
     """
-    # Read input DEM
+    # Read input DEM once
     demData = rasterUtils.readRaster(inputDEM)
     header = demData["header"]
     raster = demData["rasterData"]
@@ -305,12 +341,19 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
     nRows = header["nrows"]
     nCols = header["ncols"]
 
-    # Process each group with progress bar
-    groupExtents = {}
     n_groups = len(dirList)
-    print(f"Clipping DEM for {n_groups} groups...")
+    bufferSize = cfg["GENERAL"].getfloat("bufferSize")
     
-    iterator = tqdm(dirList, desc="Clipping DEMs", unit="group") if HAS_TQDM else dirList
+    # Determine number of workers
+    if max_workers is None:
+        max_workers = min(32, (os.cpu_count() or 1) + 4)
+    
+    # Phase 1: Prepare all clips (compute-bound, fast)
+    print(f"Preparing {n_groups} DEM clips...")
+    write_tasks = []
+    groupExtents = {}
+    
+    iterator = tqdm(dirList, desc="Preparing clips", unit="group") if HAS_TQDM else dirList
     for entry in iterator:
         dirName = entry["dirName"]
         geometries = entry["geometries"]
@@ -322,7 +365,6 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
             raise ValueError(message)
 
         # Check if any features in the group are isolated
-        bufferSize = cfg["GENERAL"].getfloat("bufferSize")
         checkFeatureIsolation(geometries, properties, bufferSize, dirName)
 
         # Get extent of all geometries in group
@@ -330,20 +372,15 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
         xMins, yMins, xMaxs, yMaxs = zip(*bounds)
 
         # Calculate extent with buffer
-        bufferSize = cfg["GENERAL"].getfloat("bufferSize")
         xMin = min(xMins) - bufferSize
         xMax = max(xMaxs) + bufferSize
         yMin = min(yMins) - bufferSize
         yMax = max(yMaxs) + bufferSize
-        groupExtents[dirName] = (xMin, xMax, yMin, yMax)  # Store extent for this group
 
-        # Convert extent to grid indices (using top-left origin)
+        # Convert extent to grid indices
         colStart = max(0, int((xMin - xOrigin) / cellSize))
         colEnd = min(nCols, int((xMax - xOrigin) / cellSize) + 1)
-
-        # Convert y-coordinates to row indices (flipped for bottom-left origin)
         rowStart = max(0, int((yOrigin + nRows * cellSize - yMax) / cellSize))
-        # Note: After flipping, we need exact pixel-center alignment
         rowEnd = min(nRows, int((yOrigin + nRows * cellSize - yMin) / cellSize))
 
         # Ensure valid row indices
@@ -354,8 +391,8 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
         # Flip row indices for bottom-left origin
         rowStart, rowEnd = nRows - rowEnd, nRows - rowStart
 
-        # Clip the DEM data
-        clippedData = raster[rowStart:rowEnd, colStart:colEnd]
+        # Clip the DEM data (numpy slicing is very fast)
+        clippedData = raster[rowStart:rowEnd, colStart:colEnd].copy()  # copy to avoid memory issues
 
         # Create header for clipped DEM
         clippedHeader = header.copy()
@@ -363,21 +400,30 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg):
         clippedHeader["nrows"] = rowEnd - rowStart
         clippedHeader["xllcenter"] = xOrigin + colStart * cellSize
         clippedHeader["yllcenter"] = yOrigin + rowStart * cellSize
-
-        # Update transformation matrix for clipped DEM
         clippedHeader["transform"] = rasterUtils.transformFromASCHeader(clippedHeader)
 
-        # Write clipped DEM
-        outputDEM = outputDir / dirName / "Inputs" / f"{dirName}_DEM"
-        rasterUtils.writeResultToRaster(clippedHeader, clippedData, outputDEM, flip=True)
-        log.debug(f"Clipped DEM saved to: {outputDEM}")
+        # Queue for writing
+        write_tasks.append((dirName, clippedData, clippedHeader, outputDir))
 
-        # Store final DEM extents (reduced by one pixel on each side to ensure DEM > clip extents of other input)
-        xMinDEM = clippedHeader["xllcenter"] + (cellSize * 0.5)
-        yMinDEM = clippedHeader["yllcenter"] + (cellSize * 0.5)
-        xMaxDEM = clippedHeader["xllcenter"] + (clippedHeader["ncols"] * cellSize) - (cellSize * 0.5)
-        yMaxDEM = clippedHeader["yllcenter"] + (clippedHeader["nrows"] * cellSize) - (cellSize * 0.5)
-        groupExtents[dirName] = (xMinDEM, xMaxDEM, yMinDEM, yMaxDEM)
+    # Phase 2: Write all clips in parallel (I/O-bound)
+    if parallel and len(write_tasks) > 1:
+        print(f"Writing {len(write_tasks)} clipped DEMs in parallel (workers={max_workers})...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_write_clipped_dem, task): task[0] for task in write_tasks}
+            
+            iterator = tqdm(as_completed(futures), total=len(futures), desc="Writing DEMs", unit="file") if HAS_TQDM else as_completed(futures)
+            for future in iterator:
+                dirName, extents = future.result()
+                groupExtents[dirName] = extents
+                log.debug(f"Clipped DEM saved for: {dirName}")
+    else:
+        # Sequential fallback
+        print(f"Writing {len(write_tasks)} clipped DEMs...")
+        iterator = tqdm(write_tasks, desc="Writing DEMs", unit="file") if HAS_TQDM else write_tasks
+        for task in iterator:
+            dirName, extents = _write_clipped_dem(task)
+            groupExtents[dirName] = extents
+            log.debug(f"Clipped DEM saved for: {dirName}")
 
     return groupExtents
 
