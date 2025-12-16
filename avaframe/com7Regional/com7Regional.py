@@ -282,7 +282,6 @@ def moveOrCopyPeakFiles(cfg, avalancheDir):
         return None, None
 
     # Get avalanche directories
-    # with logUtils.silentLogger():
     avaDirs = findAvaDirsBasedOnInputsDir(avalancheDir)
     if not avaDirs:
         log.warning("No avalanche directories found to copy/move files from")
@@ -290,30 +289,72 @@ def moveOrCopyPeakFiles(cfg, avalancheDir):
 
     # Set up outdirs
     allPeakFilesDir = pathlib.Path(avalancheDir, "allPeakFiles")
-    for dirPath in [allPeakFilesDir]:
-        if dirPath.exists():
-            shutil.rmtree(str(dirPath))
-        fU.makeADir(dirPath)
+    if allPeakFilesDir.exists():
+        shutil.rmtree(str(allPeakFilesDir))
+    fU.makeADir(allPeakFilesDir)
 
     # Get operation type
-    operation = shutil.move if cfg["GENERAL"].getboolean("moveInsteadOfCopy") else shutil.copy2
-    operationType = "Moving" if operation == shutil.move else "Copying"
+    useMove = cfg["GENERAL"].getboolean("moveInsteadOfCopy")
+    operationType = "Moving" if useMove else "Copying"
 
-    # Process each avalanche directory
+    # Collect all peak files first (fast)
+    allPeakFiles = []
     for avaDir in avaDirs:
-        log.info(f"{operationType} files from: {avaDir.name}")
-
-        # Process peak files
         peakFiles = list(avaDir.glob("Outputs/**/peakFiles/*.*"))
-        for peakFile in peakFiles:
-            targetPath = allPeakFilesDir / peakFile.name
-            operation(str(peakFile), str(targetPath))
+        allPeakFiles.extend(peakFiles)
+    
+    log.info(f"{operationType} {len(allPeakFiles)} peak files in parallel...")
+    
+    # Define copy/move function for parallel execution
+    def copy_single_file(peakFile):
+        targetPath = allPeakFilesDir / peakFile.name
+        if useMove:
+            shutil.move(str(peakFile), str(targetPath))
+        else:
+            shutil.copy2(str(peakFile), str(targetPath))
+        return True
+    
+    # Process files in parallel using ThreadPoolExecutor (I/O bound)
+    from tqdm import tqdm
+    max_workers = min(32, len(allPeakFiles))
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(copy_single_file, f) for f in allPeakFiles]
+        with tqdm(total=len(futures), desc=f"STEP 3/3: {operationType} peak files", unit="file", ncols=100) as pbar:
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    log.warning(f"Error copying file: {e}")
+                pbar.update(1)
 
+    log.info(f"Copied {len(allPeakFiles)} peak files to {allPeakFilesDir}")
     return allPeakFilesDir
+
+
+def _readRasterHeader(rasterFile):
+    """Read only the header of a raster file (fast, no data loading)."""
+    try:
+        import rasterio
+        with rasterio.open(rasterFile) as src:
+            transform = src.transform
+            return {
+                "cellsize": transform[0],
+                "xllcenter": transform[2],
+                "yllcenter": transform[5] - src.height * transform[0],  # yllcenter from top-left
+                "ncols": src.width,
+                "nrows": src.height,
+            }
+    except Exception:
+        # Fallback to full read if rasterio fails
+        raster = rasterUtils.readRaster(rasterFile)
+        return raster["header"]
 
 
 def getRasterBounds(rasterFiles):
     """Get the union bounds and validate cell sizes of multiple rasters.
+    
+    OPTIMIZED: Uses parallel header reading (no data loading).
 
     Parameters
     ----------
@@ -332,9 +373,28 @@ def getRasterBounds(rasterFiles):
     ValueError
         If cell sizes of rasters differ
     """
-    # Read first raster to get cellSize and initialize bounds
-    firstRaster = rasterUtils.readRaster(rasterFiles[0])
-    cellSize = float(firstRaster["header"]["cellsize"])
+    from tqdm import tqdm
+    
+    # Read headers in parallel (I/O bound, ThreadPool is faster)
+    max_workers = min(32, len(rasterFiles))
+    headers = []
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_readRasterHeader, f) for f in rasterFiles]
+        with tqdm(total=len(futures), desc="Reading raster headers", unit="file", ncols=100, leave=False) as pbar:
+            for future in as_completed(futures):
+                try:
+                    headers.append(future.result())
+                except Exception as e:
+                    log.warning(f"Error reading header: {e}")
+                pbar.update(1)
+    
+    if not headers:
+        raise ValueError("No valid raster headers found")
+    
+    # Get cellSize from first header
+    cellSize = float(headers[0]["cellsize"])
+    
     bounds = {
         "xMin": float("inf"),
         "yMin": float("inf"),
@@ -342,11 +402,8 @@ def getRasterBounds(rasterFiles):
         "yMax": float("-inf"),
     }
 
-    # Find bounds and validate cell sizes
-    for rasterFile in rasterFiles:
-        raster = rasterUtils.readRaster(rasterFile)
-        header = raster["header"]
-
+    # Process headers (fast, in memory)
+    for header in headers:
         if float(header["cellsize"]) != cellSize:
             raise ValueError(f"Different cell sizes found: {cellSize} vs {header['cellsize']}")
 
@@ -469,8 +526,14 @@ def mergeOutputRasters(cfg, avalancheDir):
     if invalidMethods:
         raise ValueError(f"Invalid merge methods: {invalidMethods}. Valid options are: {validMethods}")
 
-    # Process each raster type
-    for rasterType in mergeTypes:
+    from tqdm import tqdm
+    
+    # Process each raster type with progress
+    print(f"\n{'='*70}")
+    print(f"STEP 4/4: Merging rasters ({len(mergeTypes)} types)")
+    print(f"{'='*70}\n")
+    
+    for rasterType in tqdm(mergeTypes, desc="Merging raster types", unit="type", ncols=100):
         # Find all files of this type across all avalanche directories
         rasterFiles = []
         for avaDir in avaDirs:
@@ -484,7 +547,7 @@ def mergeOutputRasters(cfg, avalancheDir):
 
         log.info(f"Merging {len(rasterFiles)} {rasterType} rasters")
 
-        # Get bounds and validate cell sizes
+        # Get bounds and validate cell sizes (now parallelized!)
         bounds, cellSize = getRasterBounds(rasterFiles)
 
         # Merge and save rasters
