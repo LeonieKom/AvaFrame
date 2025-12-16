@@ -809,8 +809,7 @@ def findAvaDirsBasedOnInputsDir(Dir):
         List of pathlib.Path objects pointing to valid avalanche directories
     """
     avaDirs = [pathlib.Path(p).parent for p in pathlib.Path(Dir).glob("*/Inputs")]
-    log.info(f"Found a total of '{len(avaDirs)}' avalanche directories in: {Dir}:")
-    for avaDir in avaDirs:
-        log.info(f"'{avaDir.name}'")
+    log.info(f"Found a total of '{len(avaDirs)}' avalanche directories in: {Dir}")
+    # Don't log each directory name - too slow for 2000+ directories!
 
     return avaDirs
