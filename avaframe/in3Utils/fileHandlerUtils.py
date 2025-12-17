@@ -809,6 +809,11 @@ def findAvaDirsBasedOnInputsDir(Dir):
         List of pathlib.Path objects pointing to valid avalanche directories
     """
     avaDirs = [pathlib.Path(p).parent for p in pathlib.Path(Dir).glob("*/Inputs")]
+    
+    # Filter out special directories that are not avalanche scenarios
+    # _input is a temporary working directory used by SplitInputs
+    avaDirs = [d for d in avaDirs if not d.name.startswith('_')]
+    
     log.info(f"Found a total of '{len(avaDirs)}' avalanche directories in: {Dir}")
     # Don't log each directory name - too slow for 2000+ directories!
 
