@@ -298,11 +298,17 @@ def moveOrCopyPeakFiles(cfg, avalancheDir):
     operationType = "Moving" if useMove else "Copying"
 
     # Collect all peak files first (fast)
+    print(f"\n{'='*70}")
+    print(f"STEP 3/4: {operationType} peak files")
+    print(f"{'='*70}")
+    print(f"  Collecting peak files from {len(avaDirs)} directories...")
+    
     allPeakFiles = []
     for avaDir in avaDirs:
         peakFiles = list(avaDir.glob("Outputs/**/peakFiles/*.*"))
         allPeakFiles.extend(peakFiles)
     
+    print(f"  Found {len(allPeakFiles)} peak files")
     log.info(f"{operationType} {len(allPeakFiles)} peak files in parallel...")
     
     # Define copy/move function for parallel execution
@@ -318,9 +324,14 @@ def moveOrCopyPeakFiles(cfg, avalancheDir):
     from tqdm import tqdm
     max_workers = min(32, len(allPeakFiles))
     
+    if len(allPeakFiles) == 0:
+        print(f"  WARNING: No peak files found!")
+        log.warning("No peak files found to copy/move")
+        return allPeakFilesDir
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(copy_single_file, f) for f in allPeakFiles]
-        with tqdm(total=len(futures), desc=f"STEP 3/3: {operationType} peak files", unit="file", ncols=100) as pbar:
+        with tqdm(total=len(futures), desc=f"  {operationType} files", unit="file", ncols=100) as pbar:
             for future in as_completed(futures):
                 try:
                     future.result()
@@ -328,6 +339,7 @@ def moveOrCopyPeakFiles(cfg, avalancheDir):
                     log.warning(f"Error copying file: {e}")
                 pbar.update(1)
 
+    print(f"  Done! {len(allPeakFiles)} files copied to {allPeakFilesDir}")
     log.info(f"Copied {len(allPeakFiles)} peak files to {allPeakFilesDir}")
     return allPeakFilesDir
 
@@ -533,8 +545,9 @@ def mergeOutputRasters(cfg, avalancheDir):
     print(f"STEP 4/4: Merging rasters ({len(mergeTypes)} types)")
     print(f"{'='*70}\n")
     
-    for rasterType in tqdm(mergeTypes, desc="Merging raster types", unit="type", ncols=100):
+    for rasterType in mergeTypes:
         # Find all files of this type across all avalanche directories
+        print(f"\n  [{rasterType.upper()}] Collecting raster files...")
         rasterFiles = []
         for avaDir in avaDirs:
             peakFilesDir = avaDir / "Outputs" / "com1DFA" / "peakFiles"
@@ -542,21 +555,26 @@ def mergeOutputRasters(cfg, avalancheDir):
                 rasterFiles.extend(list(peakFilesDir.glob(f"*_{rasterType}.*")))
 
         if not rasterFiles:
+            print(f"  [{rasterType.upper()}] WARNING: No rasters found to merge")
             log.warning(f"No {rasterType} rasters found to merge")
             continue
 
-        log.info(f"Merging {len(rasterFiles)} {rasterType} rasters")
+        print(f"  [{rasterType.upper()}] Found {len(rasterFiles)} rasters")
 
         # Get bounds and validate cell sizes (now parallelized!)
+        print(f"  [{rasterType.upper()}] Reading raster headers...")
         bounds, cellSize = getRasterBounds(rasterFiles)
 
         # Merge and save rasters
         for mergeMethod in mergeMethods:
+            print(f"  [{rasterType.upper()}] Merging with method '{mergeMethod}'... (this may take a while)")
             mergedHeader, mergedData = mergeRasters(rasterFiles, bounds, mergeMethod=mergeMethod)
             outputPath = mergedRastersDir / f"merged_{rasterType}_{mergeMethod}"
             # Fix header nodata_value to match filled data (-9999)
             mergedHeader["nodata_value"] = -9999.0
+            print(f"  [{rasterType.upper()}] Writing merged raster...")
             rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=False)  # Do not flip - data already flipped when read with readRaster
+            print(f"  [{rasterType.upper()}] Saved: {outputPath}")
             log.info(f"Saved merged {rasterType} raster (method: {mergeMethod}) to: {outputPath}")
 
     return mergedRastersDir
