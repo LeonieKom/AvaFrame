@@ -217,7 +217,8 @@ def _write_asc_numpy(outFile, header, data):
         np.savetxt(f, data_clean, fmt='%.4g', delimiter=' ')
 
 
-def writeResultToRaster(header, resultArray, outFileName, flip=False, fast_ascii=True):
+def writeResultToRaster(header, resultArray, outFileName, flip=False, fast_ascii=True, 
+                        compress_uint16=False, scale_factor=None):
     """Write 2D array to a raster file with header and save to location of outFileName
 
     Parameters
@@ -234,6 +235,10 @@ def writeResultToRaster(header, resultArray, outFileName, flip=False, fast_ascii
         southernmost one. Some formats (e.g. tif) have the northernmost line first
     fast_ascii : bool
         If True, use fast native Python ASCII writer instead of rasterio (default: True)
+    compress_uint16 : bool
+        If True, convert float data to uint16 with scaling for GeoTIFF (75% space saving)
+    scale_factor : float
+        Scaling factor for uint16 compression (default: 10.0 for kPa values)
 
     Returns
     -------
@@ -252,25 +257,97 @@ def writeResultToRaster(header, resultArray, outFileName, flip=False, fast_ascii
     else:
         writeData = resultArray
 
-    # For AAIGrid: Use fast native writer
+    # For AAIGrid: Use fast native writer (no uint16 compression for ASCII)
     if header["driver"] == "AAIGrid" and fast_ascii:
         _write_asc_numpy(outFile, header, writeData)
         return outFile
     
-    # Fallback to rasterio for other formats or if fast_ascii=False
-    rasterOut = rasterio.open(
-        outFile,
-        "w",
-        driver=header["driver"],
-        crs=header["crs"],
-        nodata=header["nodata_value"],
-        transform=header["transform"],
-        height=writeData.shape[0],
-        width=writeData.shape[1],
-        count=1,
-        dtype=writeData.dtype,
-    )
-    rasterOut.write(writeData, 1)
-    rasterOut.close()
+    # Apply uint16 compression for GeoTIFF
+    if compress_uint16 and header["driver"] == "GTiff":
+        if scale_factor is None:
+            scale_factor = 10.0  # Default: 0.1 kPa precision
+        
+        # Scale and convert to uint16
+        writeData_scaled = writeData * scale_factor
+        writeData_scaled = np.clip(writeData_scaled, 0, 65535)  # Clip to uint16 range
+        writeData_uint16 = writeData_scaled.astype(np.uint16)
+        
+        # Set nodata value for uint16
+        nodata_uint16 = 65535
+        writeData_uint16[np.isnan(writeData)] = nodata_uint16
+        
+        # Write with metadata
+        rasterOut = rasterio.open(
+            outFile,
+            "w",
+            driver=header["driver"],
+            crs=header["crs"],
+            nodata=nodata_uint16,
+            transform=header["transform"],
+            height=writeData_uint16.shape[0],
+            width=writeData_uint16.shape[1],
+            count=1,
+            dtype=np.uint16,
+            compress='DEFLATE',  # Add compression
+            tiled=True,
+        )
+        rasterOut.write(writeData_uint16, 1)
+        # Store scale factor as metadata
+        rasterOut.update_tags(scale_factor=scale_factor, units='kPa_scaled')
+        rasterOut.close()
+    else:
+        # Standard write (float64 or original dtype)
+        rasterOut = rasterio.open(
+            outFile,
+            "w",
+            driver=header["driver"],
+            crs=header["crs"],
+            nodata=header["nodata_value"],
+            transform=header["transform"],
+            height=writeData.shape[0],
+            width=writeData.shape[1],
+            count=1,
+            dtype=writeData.dtype,
+        )
+        rasterOut.write(writeData, 1)
+        rasterOut.close()
     
     return outFile
+
+
+def readRasterWithScaling(rasterPath):
+    """Read a raster file and apply scaling if it's uint16 compressed.
+    
+    Parameters
+    ----------
+    rasterPath : str or Path
+        Path to the raster file
+    
+    Returns
+    -------
+    data : numpy array
+        Raster data as float32 (scaled back if uint16)
+    header : dict
+        Raster header information
+    """
+    import rasterio
+    
+    with rasterio.open(rasterPath) as src:
+        data = src.read(1)
+        
+        # Check if this is a uint16 compressed file
+        if src.dtypes[0] == 'uint16':
+            # Get scale factor from metadata
+            tags = src.tags()
+            scale_factor = float(tags.get('scale_factor', 10.0))
+            
+            # Convert back to float and scale
+            nodata = src.nodata if src.nodata is not None else 65535
+            data_float = data.astype(np.float32)
+            data_float[data == nodata] = np.nan
+            data_float = data_float / scale_factor
+            
+            return data_float, dict(src.profile)
+        else:
+            # Standard float raster
+            return data.astype(np.float32), dict(src.profile)

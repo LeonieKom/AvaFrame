@@ -573,8 +573,15 @@ def mergeOutputRasters(cfg, avalancheDir):
             # Fix header nodata_value to match filled data (-9999)
             mergedHeader["nodata_value"] = -9999.0
             print(f"  [{rasterType.upper()}] Writing merged raster...")
-            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=False)  # Do not flip - data already flipped when read with readRaster
+            
+            # Apply uint16 compression for PPR if output is GeoTIFF
+            compress_uint16 = (rasterType == "ppr" and mergedHeader.get("driver") == "GTiff")
+            scale_factor = 10.0 if compress_uint16 else None
+            
+            rasterUtils.writeResultToRaster(mergedHeader, mergedData, outputPath, flip=False,
+                                           compress_uint16=compress_uint16, scale_factor=scale_factor)
             print(f"  [{rasterType.upper()}] Saved: {outputPath}")
             log.info(f"Saved merged {rasterType} raster (method: {mergeMethod}) to: {outputPath}")
+
 
     return mergedRastersDir

@@ -2800,7 +2800,10 @@ def exportFields(
         outDirPeak = outDir / "peakFiles" / "timeSteps"
         fU.makeADir(outDirPeak)
         outFile = outDirPeak / dataName
-        IOf.writeResultToRaster(dem["originalHeader"], resField, outFile, flip=True)
+        # Use uint16 compression for PPR in GeoTIFF format
+        compress_uint16 = (resType == "ppr" and dem["originalHeader"]["driver"] == "GTiff")
+        IOf.writeResultToRaster(dem["originalHeader"], resField, outFile, flip=True, 
+                               compress_uint16=compress_uint16, scale_factor=10.0)
         if TSave == "final":
             log.debug(
                 "Results parameter: %s exported to Outputs/peakFiles for time step: %.2f - FINAL time step "
@@ -2811,7 +2814,10 @@ def exportFields(
             outDirPeakAll = outDir / "peakFiles"
             fU.makeADir(outDirPeakAll)
             outFile = outDirPeakAll / dataName
-            IOf.writeResultToRaster(dem["originalHeader"], resField, outFile, flip=True)
+            # Use uint16 compression for PPR in GeoTIFF format
+            compress_uint16 = (resType == "ppr" and dem["originalHeader"]["driver"] == "GTiff")
+            IOf.writeResultToRaster(dem["originalHeader"], resField, outFile, flip=True,
+                                   compress_uint16=compress_uint16, scale_factor=10.0)
         else:
             log.debug(
                 "Results parameter: %s has been exported to Outputs/peakFiles for time step: %.2f "
