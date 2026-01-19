@@ -1995,8 +1995,8 @@ def DFAIterate(cfg, particles, fields, dem, inputSimLines, outDir, cuSimName, si
         massTotal.append(particles["mTot"])
         timeM.append(t)
         pfvTimeMax.append(np.nanmax(fields["FV"]))
-        # print progress to terminal
-        print("time step t = %f s\r" % t, end="")
+        # Don't print time steps - they interfere with the regional progress bar
+        # The progress is already shown by the tqdm bar in com7Regional
 
         # create range time diagram
         # determine avalanche front and flow characteristics in respective coodrinate system
