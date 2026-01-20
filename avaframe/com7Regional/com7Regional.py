@@ -467,11 +467,17 @@ def mergeRasters(rasterFiles, bounds, mergeMethod="max"):
     # CRITICAL FIX: Convert masked array to regular array with consistent formatting
     # rasterio.merge() returns masked array which causes mixed formatting (nan, 0.0, 0)
     # GIS tools can't handle this inconsistency
+    # 
+    # IMPORTANT: If input rasters are uint16 (compressed PPR), we must convert to float32
+    # BEFORE calling filled(), because -9999 doesn't fit in uint16 (range 0-65535)
     if ma.isMaskedArray(mergedData):
-        # It's a masked array - convert to regular array with -9999 for nodata
+        # First convert to float32 to allow -9999 nodata value
+        mergedData = mergedData.astype(np.float32)
+        # Then fill masked values with -9999
         mergedData = mergedData.filled(-9999.0)
-    # Ensure consistent data type for GIS compatibility
-    mergedData = mergedData.astype(np.float32, copy=False)
+    else:
+        # Ensure consistent data type for GIS compatibility
+        mergedData = mergedData.astype(np.float32, copy=False)
 
     # Calculate dimensions for merged raster; helps checking if merged raster is correct
     nCols = int((bounds["xMax"] - bounds["xMin"]) / outputTransform[0])
