@@ -14,6 +14,7 @@ from avaframe.in3Utils import logUtils
 from avaframe.in2Trans import rasterUtils
 from avaframe.in3Utils import fileHandlerUtils as fU
 
+import rasterio
 from rasterio.merge import merge
 
 from avaframe.in3Utils.fileHandlerUtils import findAvaDirsBasedOnInputsDir
