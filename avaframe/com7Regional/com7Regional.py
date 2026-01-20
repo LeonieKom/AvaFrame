@@ -458,6 +458,15 @@ def mergeRasters(rasterFiles, bounds, mergeMethod="max"):
         2D array containing the merged raster data
     """
 
+    # Check if input rasters are uint16 compressed (scaled PPR values)
+    # We need to read scale_factor from metadata to de-scale after merging
+    scale_factor = None
+    with rasterio.open(rasterFiles[0]) as src:
+        if src.dtypes[0] == 'uint16':
+            tags = src.tags()
+            scale_factor = float(tags.get('scale_factor', 10.0))
+            log.info(f"Detected uint16 compressed rasters with scale_factor={scale_factor}")
+    
     # Merge data with rasterio
     # If something other than min/max is wanted, it is possible to provide a custom function to merge
     mergedData, outputTransform = merge(rasterFiles, method=mergeMethod, masked=True)
@@ -478,6 +487,13 @@ def mergeRasters(rasterFiles, bounds, mergeMethod="max"):
     else:
         # Ensure consistent data type for GIS compatibility
         mergedData = mergedData.astype(np.float32, copy=False)
+    
+    # De-scale uint16 compressed data back to original values (e.g., kPa)
+    if scale_factor is not None:
+        # Only de-scale valid data (not nodata values)
+        valid_mask = mergedData != -9999.0
+        mergedData[valid_mask] = mergedData[valid_mask] / scale_factor
+        log.info(f"De-scaled merged data by factor {scale_factor}")
 
     # Calculate dimensions for merged raster; helps checking if merged raster is correct
     nCols = int((bounds["xMax"] - bounds["xMin"]) / outputTransform[0])
