@@ -15,12 +15,29 @@ log = logging.getLogger(__name__)
 
 
 def _checkForFolderAndDelete(baseDir, folderName):
-    '''Helper function ONLY USE WITH CHECKED INPUT'''
+    '''Helper function ONLY USE WITH CHECKED INPUT
+    
+    Includes retry logic for Windows file locking issues.
+    '''
+    import time
     fPath = os.path.join(baseDir, folderName)
-    try:
-        shutil.rmtree(fPath)
-    except FileNotFoundError:
-        log.debug("No %s folder found.", folderName)
+    max_retries = 3
+    retry_delay = 0.5  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            shutil.rmtree(fPath)
+            return
+        except FileNotFoundError:
+            log.debug("No %s folder found.", folderName)
+            return
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                log.debug(f"PermissionError deleting {folderName}, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                log.warning(f"Could not delete {folderName} after {max_retries} attempts: {e}")
 
 
 def _checkAvaDirVariable(avaDir):

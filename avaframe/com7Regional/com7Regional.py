@@ -254,9 +254,14 @@ def processAvaDirCom1Regional(cfgMain, cfgCom7, avalancheDir):
     cfgCom1DFA, cfgCom7 = cfgHandling.applyCfgOverride(cfgCom1DFA, cfgCom7, com1DFA, addModValues=False)
 
     # Run com1DFA in the current avalanche directory
-    com1DFA.com1DFAMain(cfgMain, cfgInfo=cfgCom1DFA)
-
-    return avalancheDir, "Success"
+    try:
+        com1DFA.com1DFAMain(cfgMain, cfgInfo=cfgCom1DFA)
+        return avalancheDir, "Success"
+    finally:
+        # Close all handlers to release file locks (critical for Windows)
+        for handler in log.handlers[:]:
+            handler.close()
+            log.removeHandler(handler)
 
 
 def moveOrCopyPeakFiles(cfg, avalancheDir):
