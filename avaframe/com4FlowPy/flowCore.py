@@ -14,12 +14,8 @@ import gc
 import psutil
 import time
 
-if os.name == "nt":
-    from multiprocessing.pool import Pool as Pool
-elif platform.system() == "Darwin":
-    from multiprocessing.pool import ThreadPool as Pool
-else:
-    from multiprocessing import Pool
+# Use true multiprocessing Pool on all platforms for parallel CPU utilization
+from multiprocessing import Pool
 
 from avaframe.com4FlowPy.flowClass import Cell
 

@@ -19,12 +19,9 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon as sPolygon
 
-if os.name == "nt":
-    from multiprocessing.pool import ThreadPool as Pool
-elif platform.system() == "Darwin":
-    from multiprocessing.pool import ThreadPool as Pool
-else:
-    from multiprocessing import Pool
+# Use true multiprocessing Pool on all platforms for parallel CPU utilization
+# (Previously Windows/macOS used ThreadPool which is GIL-bound and not truly parallel)
+from multiprocessing import Pool
 
 # Local imports
 from avaframe.version import getVersion

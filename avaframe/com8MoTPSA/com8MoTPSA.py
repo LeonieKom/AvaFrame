@@ -9,12 +9,8 @@ import shutil
 
 from avaframe.in3Utils.cfgUtils import cfgToRcf
 
-if os.name == "nt":
-    from multiprocessing.pool import ThreadPool as Pool
-elif platform.system() == "Darwin":
-    from multiprocessing.pool import ThreadPool as Pool
-else:
-    from multiprocessing import Pool
+# Use true multiprocessing Pool on all platforms for parallel CPU utilization
+from multiprocessing import Pool
 
 import avaframe.com1DFA.com1DFA as com1DFA
 from avaframe.in3Utils import cfgUtils
