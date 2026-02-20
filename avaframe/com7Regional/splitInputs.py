@@ -345,8 +345,15 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
     bufferSize = cfg["GENERAL"].getfloat("bufferSize")
     
     # Determine number of workers
+    # In regional mode, ALARM_MAX_WORKERS_PER_CELL limits per-cell parallelism
+    # to prevent I/O contention when multiple cells write clipped DEMs simultaneously
     if max_workers is None:
-        max_workers = min(32, (os.cpu_count() or 1) + 4)
+        env_limit = os.environ.get('ALARM_MAX_WORKERS_PER_CELL')
+        if env_limit:
+            max_workers = min(int(env_limit), 8)  # Cap at 8 for I/O-bound work
+            log.info(f"Regional mode: limiting DEM clip workers to {max_workers}")
+        else:
+            max_workers = min(32, (os.cpu_count() or 1) + 4)
     
     # Phase 1: Prepare all clips (compute-bound, fast)
     print(f"Preparing {n_groups} DEM clips...")
