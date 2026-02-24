@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
 import os
+import numpy as np
 
 try:
     from tqdm import tqdm
@@ -89,12 +90,31 @@ def splitInputsMain(avalancheDir, outputDir, cfg, cfgMain):
     n_groups = len(dirListGrouped)
     print(f"Creating {n_groups} avalanche directories...")
     
-    # Use tqdm for progress bar if available
-    iterator = tqdm(dirListGrouped, desc="Creating directories", unit="dir") if HAS_TQDM else dirListGrouped
-    for entry in iterator:
+    # Batch directory creation for better I/O performance
+    # Instead of calling initializeFolderStruct per directory (slow on network storage),
+    # create all directories in one pass
+    t_start = time.time()
+    
+    # Collect all directory paths to create
+    all_dirs_to_create = []
+    for entry in dirListGrouped:
         dirName = entry["dirName"]
-        initializeFolderStruct(str(outputDir / dirName), removeExisting=True)
-        log.debug(f"Created folder structure for '{dirName}'.")
+        base_dir = outputDir / dirName
+        # Standard AvaFrame structure
+        subdirs = [
+            base_dir / "Inputs" / "REL",
+            base_dir / "Inputs" / "ENT", 
+            base_dir / "Inputs" / "RES",
+            base_dir / "Outputs" / "com1DFA" / "peakFiles",
+            base_dir / "Outputs" / "com1DFA" / "particles",
+        ]
+        all_dirs_to_create.extend(subdirs)
+    
+    # Create all directories in batch
+    for dir_path in all_dirs_to_create:
+        dir_path.mkdir(parents=True, exist_ok=True)
+    
+    log.info(f"Created {n_groups} directory structures in {time.time()-t_start:.1f}s")
     log.info("Finished folder initialization")
 
     # Step 3: Split and move release areas to each directory
@@ -208,10 +228,17 @@ def splitAndMoveReleaseAreas(dirList, inputShp, outputDir):
             featuresByName[name].append((properties, entry["geometries"][i]))
 
     # Write shapefiles to their respective folders
-    for name, features in featuresByName.items():
+    # Use batch writing with progress bar for better I/O performance
+    print(f"Writing {len(featuresByName)} release area shapefiles...")
+    t_start = time.time()
+    
+    iterator = tqdm(featuresByName.items(), desc="Writing REL shapefiles", unit="file") if HAS_TQDM else featuresByName.items()
+    for name, features in iterator:
         shpOutPath = outputDir / name / "Inputs" / "REL" / name
         shpConv.writeShapefile(shpOutPath, fields, fieldNames, features, srs)
         log.debug(f"Saved release area to '{shpOutPath}'.")
+    
+    log.info(f"Wrote {len(featuresByName)} REL shapefiles in {time.time()-t_start:.1f}s")
 
 
 def checkFeatureIsolation(geometries, properties, bufferSize, groupName):
@@ -271,6 +298,96 @@ def checkFeatureIsolation(geometries, properties, bufferSize, groupName):
             message = f"Feature '{featureName}' in group '{groupName}' is isolated from all other features - consider assigning it to a different group"
             log.error(message)
             raise ValueError(message)
+
+
+def _compute_flow_direction(raster, header, xMins, yMins, xMaxs, yMaxs):
+    """Compute the mean downhill direction from the DEM at a PRA group location.
+
+    Extracts a small DEM patch covering the PRA extent (plus 50 m padding),
+    computes the spatial gradient, and returns a normalized downhill vector
+    in geographic coordinates.
+
+    Parameters
+    ----------
+    raster : numpy.ndarray
+        Full DEM raster (row 0 = north).
+    header : dict
+        Raster header with cellsize, xllcenter, yllcenter, nrows, ncols.
+    xMins, yMins, xMaxs, yMaxs : list of float
+        Per-geometry bounding box coordinates of the PRA group.
+
+    Returns
+    -------
+    downhill_x : float
+        Normalized x-component of the downhill direction (+east, -west).
+        0.0 if terrain is flat.
+    downhill_y : float
+        Normalized y-component of the downhill direction (+north, -south).
+        0.0 if terrain is flat.
+    slope_deg : float
+        Mean slope angle in degrees.
+    """
+    cellSize = header["cellsize"]
+    xOrigin = header["xllcenter"]
+    yOrigin = header["yllcenter"]
+    nRows = header["nrows"]
+    nCols = header["ncols"]
+
+    # PRA extent with small padding (50 m) to get representative gradient
+    padding = max(50.0, cellSize * 3)
+    xMin = min(xMins) - padding
+    xMax = max(xMaxs) + padding
+    yMin = min(yMins) - padding
+    yMax = max(yMaxs) + padding
+
+    # Convert geographic extent to raster indices (row 0 = top/north)
+    colStart = max(0, int((xMin - xOrigin) / cellSize))
+    colEnd = min(nCols, int((xMax - xOrigin) / cellSize) + 1)
+    # Geographic row indices (0 = south)
+    geoRowStart = max(0, int((yOrigin + nRows * cellSize - yMax) / cellSize))
+    geoRowEnd = min(nRows, int((yOrigin + nRows * cellSize - yMin) / cellSize))
+    # Flip to numpy row indices (0 = north)
+    rowStart = nRows - geoRowEnd
+    rowEnd = nRows - geoRowStart
+
+    if rowEnd <= rowStart or colEnd <= colStart:
+        return 0.0, 0.0, 0.0
+
+    patch = raster[rowStart:rowEnd, colStart:colEnd]
+
+    if patch.size < 9:  # need at least a 3x3 patch
+        return 0.0, 0.0, 0.0
+
+    # Mask nodata values (typically -9999 or very large negatives)
+    valid_mask = patch > -9000
+    if np.sum(valid_mask) < 9:
+        return 0.0, 0.0, 0.0
+
+    # Compute gradient on the patch
+    # axis=0: row gradient — positive = value increases with row index = increases southward
+    # axis=1: col gradient — positive = value increases with col index = increases eastward
+    dy_raster, dx_raster = np.gradient(patch, cellSize)
+
+    # Convert to geographic gradient (positive = uphill direction)
+    # geo dz/dx: same as raster dx (positive = elevation increases east)
+    # geo dz/dy: negate raster dy (in raster, row increases south; in geo, y increases north)
+    geo_dzdx = np.nanmean(np.where(valid_mask, dx_raster, np.nan))
+    geo_dzdy = -np.nanmean(np.where(valid_mask, dy_raster, np.nan))
+
+    if np.isnan(geo_dzdx) or np.isnan(geo_dzdy):
+        return 0.0, 0.0, 0.0
+
+    magnitude = np.sqrt(geo_dzdx**2 + geo_dzdy**2)
+    slope_deg = np.degrees(np.arctan(magnitude))
+
+    if magnitude < 1e-10:
+        return 0.0, 0.0, slope_deg
+
+    # Downhill direction = opposite of gradient (gradient points uphill)
+    downhill_x = -geo_dzdx / magnitude
+    downhill_y = -geo_dzdy / magnitude
+
+    return downhill_x, downhill_y, slope_deg
 
 
 def _write_clipped_dem(args):
@@ -344,6 +461,16 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
     n_groups = len(dirList)
     bufferSize = cfg["GENERAL"].getfloat("bufferSize")
     
+    # Read directional clipping settings
+    useDirectional = cfg.has_section("DIRECTIONAL") and cfg["DIRECTIONAL"].getboolean("enabled", fallback=False)
+    if useDirectional:
+        uphillRatio = cfg["DIRECTIONAL"].getfloat("uphillBufferRatio", fallback=0.25)
+        minUphillBuffer = cfg["DIRECTIONAL"].getfloat("minUphillBuffer", fallback=200.0)
+        flatThreshold = cfg["DIRECTIONAL"].getfloat("flatTerrainThreshold", fallback=2.0)
+        log.info(f"Directional clipping enabled: uphillRatio={uphillRatio}, "
+                 f"minUphill={minUphillBuffer}m, flatThreshold={flatThreshold}°")
+        dirClipCount = 0  # count how many groups used directional clipping
+    
     # Determine number of workers
     # In regional mode, ALARM_MAX_WORKERS_PER_CELL limits per-cell parallelism
     # to prevent I/O contention when multiple cells write clipped DEMs simultaneously
@@ -359,6 +486,7 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
     print(f"Preparing {n_groups} DEM clips...")
     write_tasks = []
     groupExtents = {}
+    totalPixelsSaved = 0
     
     iterator = tqdm(dirList, desc="Preparing clips", unit="group") if HAS_TQDM else dirList
     for entry in iterator:
@@ -378,11 +506,50 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
         bounds = [geom.bounds for geom in geometries]
         xMins, yMins, xMaxs, yMaxs = zip(*bounds)
 
-        # Calculate extent with buffer
-        xMin = min(xMins) - bufferSize
-        xMax = max(xMaxs) + bufferSize
-        yMin = min(yMins) - bufferSize
-        yMax = max(yMaxs) + bufferSize
+        # Calculate extent with buffer — symmetric or directional
+        if useDirectional:
+            # Compute mean flow direction from DEM gradient at PRA location
+            downhill_x, downhill_y, slope_deg = _compute_flow_direction(
+                raster, header, xMins, yMins, xMaxs, yMaxs
+            )
+
+            if slope_deg >= flatThreshold and (abs(downhill_x) > 1e-6 or abs(downhill_y) > 1e-6):
+                # Asymmetric buffer: full downhill, reduced uphill, proportional on sides
+                # Each direction gets a factor between uphillRatio and 1.0
+                # based on alignment with the downhill vector
+                eastFactor  = uphillRatio + (1.0 - uphillRatio) * max(0.0, downhill_x)
+                westFactor  = uphillRatio + (1.0 - uphillRatio) * max(0.0, -downhill_x)
+                northFactor = uphillRatio + (1.0 - uphillRatio) * max(0.0, downhill_y)
+                southFactor = uphillRatio + (1.0 - uphillRatio) * max(0.0, -downhill_y)
+
+                # Apply minimum uphill buffer
+                eastBuf  = max(minUphillBuffer, eastFactor * bufferSize)
+                westBuf  = max(minUphillBuffer, westFactor * bufferSize)
+                northBuf = max(minUphillBuffer, northFactor * bufferSize)
+                southBuf = max(minUphillBuffer, southFactor * bufferSize)
+
+                xMin = min(xMins) - westBuf
+                xMax = max(xMaxs) + eastBuf
+                yMin = min(yMins) - southBuf
+                yMax = max(yMaxs) + northBuf
+
+                dirClipCount += 1
+                log.debug(f"{dirName}: directional clip (slope={slope_deg:.1f}°, "
+                          f"downhill=[{downhill_x:.2f},{downhill_y:.2f}]) → "
+                          f"E={eastBuf:.0f} W={westBuf:.0f} N={northBuf:.0f} S={southBuf:.0f} m")
+            else:
+                # Flat terrain or no clear direction → symmetric buffer
+                xMin = min(xMins) - bufferSize
+                xMax = max(xMaxs) + bufferSize
+                yMin = min(yMins) - bufferSize
+                yMax = max(yMaxs) + bufferSize
+                log.debug(f"{dirName}: symmetric buffer (slope={slope_deg:.1f}° < {flatThreshold}°)")
+        else:
+            # Original symmetric buffer
+            xMin = min(xMins) - bufferSize
+            xMax = max(xMaxs) + bufferSize
+            yMin = min(yMins) - bufferSize
+            yMax = max(yMaxs) + bufferSize
 
         # Convert extent to grid indices
         colStart = max(0, int((xMin - xOrigin) / cellSize))
@@ -409,8 +576,26 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
         clippedHeader["yllcenter"] = yOrigin + rowStart * cellSize
         clippedHeader["transform"] = rasterUtils.transformFromASCHeader(clippedHeader)
 
+        # Track pixel savings for directional clipping
+        if useDirectional:
+            actualPixels = (colEnd - colStart) * (rowEnd - rowStart)
+            # Estimate what symmetric clipping would have produced
+            pra_w = max(xMaxs) - min(xMins)
+            pra_h = max(yMaxs) - min(yMins)
+            symCols = int((pra_w + 2 * bufferSize) / cellSize) + 1
+            symRows = int((pra_h + 2 * bufferSize) / cellSize) + 1
+            symPixels = symCols * symRows
+            totalPixelsSaved += max(0, symPixels - actualPixels)
+
         # Queue for writing
         write_tasks.append((dirName, clippedData, clippedHeader, outputDir))
+
+    # Summary for directional clipping
+    if useDirectional:
+        log.info(f"Directional clipping applied to {dirClipCount}/{n_groups} groups")
+        if totalPixelsSaved > 0:
+            savedMB = totalPixelsSaved * 4 / (1024 * 1024)  # float32 = 4 bytes
+            log.info(f"Estimated pixel savings: {totalPixelsSaved:,} pixels (~{savedMB:.1f} MB)")
 
     # Phase 2: Write all clips in parallel (I/O-bound)
     if parallel and len(write_tasks) > 1:
