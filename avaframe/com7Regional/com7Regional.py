@@ -1,5 +1,6 @@
 """Module for handling regional avalanche simulations."""
 
+import os
 import pathlib
 import shutil
 import logging
@@ -69,10 +70,47 @@ def com7RegionalMain(cfgMain, cfg):
     totalSims = getTotalNumberOfSims(avaDirs, cfgMain, cfg)
     log.info(f"Found {totalSims} (new) simulations to perform across {len(avaDirs)} directories")
 
-    # Get number of processes based on number of avaDirs
-    nProcesses = cfgUtils.getNumberOfProcesses(cfgMain, len(avaDirs))
+    # -------------------------------------------------------------------------
+    # Dynamic parallelism: decide how many PRA simulations run in parallel.
+    #
+    # Parallelization levels (outer → inner):
+    #   L1  regional_runner  → N cells in parallel   (ThreadPoolExecutor)
+    #   L2  com7Regional     → M PRAs in parallel     (ProcessPoolExecutor)  ← HERE
+    #   L3  com1DFA per PRA  → 1 process              (always 1, set below)
+    #   L4  Numba threads    → T threads per process   (NUMBA_NUM_THREADS)
+    #
+    # Goal: L1 × L2 ≈ total_cores  so the machine is busy but not overloaded.
+    #
+    # ALARM_MAX_WORKERS_PER_CELL (set by regional_runner) is the *default*
+    # worker budget for this cell.  It is calculated as cores / max_cells and
+    # works well for small cells.  For cells with many PRAs we can safely use
+    # all of this budget; for cells with very few PRAs we cap at nAvaDirs so
+    # we don't spawn more workers than there is work.
+    # -------------------------------------------------------------------------
+    import multiprocessing
 
-    # Set nCPU for com1 to 1 to avoid nested parallelization
+    nAvaDirs = len(avaDirs)
+    totalCores = multiprocessing.cpu_count() or 4
+
+    # Read the per-cell worker budget from the environment (set by regional_runner)
+    envWorkers = os.environ.get('ALARM_MAX_WORKERS_PER_CELL')
+    if envWorkers:
+        workerBudget = int(envWorkers)
+    else:
+        # Standalone / non-regional mode: use cfgMain nCPU as before
+        workerBudget = cfgUtils.getNumberOfProcesses(cfgMain, nAvaDirs)
+
+    # Never use more workers than avalanche directories
+    nProcesses = min(workerBudget, nAvaDirs)
+    # Sanity: at least 1
+    nProcesses = max(1, nProcesses)
+
+    log.info(f"Dynamic parallelism: {nAvaDirs} PRAs, worker budget {workerBudget}, "
+             f"using {nProcesses} parallel processes (total cores: {totalCores})")
+
+    # Set nCPU for com1DFA *inside each PRA* to 1.
+    # Each PRA runs a single com1DFA simulation — nested parallelism at L3
+    # would cause L1 × L2 × L3 processes and overload the machine.
     cfgMain["MAIN"]["nCPU"] = "1"
 
     # Track progress and results
@@ -83,8 +121,8 @@ def com7RegionalMain(cfgMain, cfg):
     from tqdm import tqdm
     
     print(f"\n{'='*70}")
-    print(f"STEP 2/3: Running {len(avaDirs)} avalanche simulations")
-    print(f"Using {nProcesses} parallel processes")
+    print(f"STEP 2/3: Running {nAvaDirs} avalanche simulations")
+    print(f"Using {nProcesses} parallel processes (budget: {workerBudget}, cores: {totalCores})")
     print(f"{'='*70}\n")
 
     # Process avalanche directories within the regional folder concurrently
