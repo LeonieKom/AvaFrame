@@ -364,15 +364,16 @@ def _compute_flow_direction(raster, header, xMins, yMins, xMaxs, yMaxs):
         return 0.0, 0.0, 0.0
 
     # Compute gradient on the patch
-    # axis=0: row gradient — positive = value increases with row index = increases southward
-    # axis=1: col gradient — positive = value increases with col index = increases eastward
+    # rasterUtils.readRaster applies np.flipud(), so row 0 = SOUTH, row index increases NORTHWARD.
+    # axis=0: row gradient — positive = value increases with row index = increases NORTHWARD
+    # axis=1: col gradient — positive = value increases with col index = increases EASTWARD
     dy_raster, dx_raster = np.gradient(patch, cellSize)
 
     # Convert to geographic gradient (positive = uphill direction)
     # geo dz/dx: same as raster dx (positive = elevation increases east)
-    # geo dz/dy: negate raster dy (in raster, row increases south; in geo, y increases north)
+    # geo dz/dy: same as raster dy (positive = elevation increases north, because row 0 = south)
     geo_dzdx = np.nanmean(np.where(valid_mask, dx_raster, np.nan))
-    geo_dzdy = -np.nanmean(np.where(valid_mask, dy_raster, np.nan))
+    geo_dzdy = np.nanmean(np.where(valid_mask, dy_raster, np.nan))
 
     if np.isnan(geo_dzdx) or np.isnan(geo_dzdy):
         return 0.0, 0.0, 0.0
