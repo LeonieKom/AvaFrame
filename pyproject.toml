@@ -9,7 +9,7 @@ name = "avaframe"
 description = "The Open Avalanche Framework"
 readme = "README.md"
 dynamic = ["version"]
-license = "EUPL-1.2"
+license = { text = "EUPL-1.2" }
 authors = [
     { name = "AvaFrame Contributors", email = "felix@avaframe.org" }
 ]
