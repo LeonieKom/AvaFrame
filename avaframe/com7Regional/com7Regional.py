@@ -407,15 +407,19 @@ def _readRasterHeader(rasterFile):
         return raster["header"]
 
 
-def getRasterBounds(rasterFiles):
+def getRasterBounds(rasterFiles, maxExtentKm=100.0):
     """Get the union bounds and validate cell sizes of multiple rasters.
     
     OPTIMIZED: Uses parallel header reading (no data loading).
+    Includes outlier detection to prevent OOM from stale/corrupted rasters.
 
     Parameters
     ----------
     rasterFiles : list
         List of paths to raster files
+    maxExtentKm : float, optional
+        Maximum allowed extent in km for either axis (default: 100 km).
+        If exceeded after outlier filtering, raises ValueError.
 
     Returns
     -------
@@ -427,20 +431,23 @@ def getRasterBounds(rasterFiles):
     Raises
     ------
     ValueError
-        If cell sizes of rasters differ
+        If cell sizes of rasters differ or merged extent is unreasonably large
     """
     from tqdm import tqdm
     
     # Read headers in parallel (I/O bound, ThreadPool is faster)
     max_workers = min(32, len(rasterFiles))
     headers = []
+    header_files = []  # track which file each header belongs to
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_readRasterHeader, f) for f in rasterFiles]
-        with tqdm(total=len(futures), desc="Reading raster headers", unit="file", ncols=100, leave=False) as pbar:
-            for future in as_completed(futures):
+        future_to_file = {executor.submit(_readRasterHeader, f): f for f in rasterFiles}
+        with tqdm(total=len(future_to_file), desc="Reading raster headers", unit="file", ncols=100, leave=False) as pbar:
+            for future in as_completed(future_to_file):
                 try:
-                    headers.append(future.result())
+                    hdr = future.result()
+                    headers.append(hdr)
+                    header_files.append(future_to_file[future])
                 except Exception as e:
                     log.warning(f"Error reading header: {e}")
                 pbar.update(1)
@@ -450,6 +457,50 @@ def getRasterBounds(rasterFiles):
     
     # Get cellSize from first header
     cellSize = float(headers[0]["cellsize"])
+    
+    # --- Outlier detection (median-based) ---
+    # Compute centre coordinate for each raster; flag any that are far from
+    # the median as potential stale/corrupted files from a previous run.
+    if len(headers) >= 3:
+        centres_x = []
+        centres_y = []
+        for h in headers:
+            cx = float(h["xllcenter"]) + float(h["ncols"]) * cellSize / 2.0
+            cy = float(h["yllcenter"]) + float(h["nrows"]) * cellSize / 2.0
+            centres_x.append(cx)
+            centres_y.append(cy)
+        
+        med_x = float(np.median(centres_x))
+        med_y = float(np.median(centres_y))
+        
+        # Threshold: any raster whose centre is > maxExtentKm/2 from the median
+        # is almost certainly from a different location (e.g. stale run)
+        threshold_m = maxExtentKm * 1000.0 / 2.0
+        
+        keep_idx = []
+        drop_idx = []
+        for i, (cx, cy) in enumerate(zip(centres_x, centres_y)):
+            dist = ((cx - med_x)**2 + (cy - med_y)**2) ** 0.5
+            if dist > threshold_m:
+                drop_idx.append(i)
+            else:
+                keep_idx.append(i)
+        
+        if drop_idx:
+            log.warning(f"Outlier detection: {len(drop_idx)} of {len(headers)} rasters are "
+                        f"far from median centre ({med_x:.0f}, {med_y:.0f}). Dropping them:")
+            for i in drop_idx:
+                log.warning(f"  DROPPED: {header_files[i]} "
+                            f"(centre: {centres_x[i]:.0f}, {centres_y[i]:.0f}, "
+                            f"dist: {((centres_x[i]-med_x)**2+(centres_y[i]-med_y)**2)**0.5/1000:.1f} km)")
+            
+            headers = [headers[i] for i in keep_idx]
+            header_files = [header_files[i] for i in keep_idx]
+            # Also filter the rasterFiles list so the caller can use it
+            rasterFiles[:] = [rasterFiles[i] for i in keep_idx]
+            
+            if not headers:
+                raise ValueError("All rasters were filtered as outliers — no valid rasters remain")
     
     bounds = {
         "xMin": float("inf"),
@@ -473,6 +524,23 @@ def getRasterBounds(rasterFiles):
         bounds["yMax"] = max(
             bounds["yMax"],
             float(header["yllcenter"]) + float(header["nrows"]) * cellSize,
+        )
+
+    # --- Final extent sanity check ---
+    extent_x_km = (bounds["xMax"] - bounds["xMin"]) / 1000.0
+    extent_y_km = (bounds["yMax"] - bounds["yMin"]) / 1000.0
+    log.info(f"Merged extent: {extent_x_km:.1f} km x {extent_y_km:.1f} km "
+             f"({len(headers)} rasters, cellSize={cellSize} m)")
+    
+    if extent_x_km > maxExtentKm or extent_y_km > maxExtentKm:
+        n_pixels_x = int((bounds["xMax"] - bounds["xMin"]) / cellSize)
+        n_pixels_y = int((bounds["yMax"] - bounds["yMin"]) / cellSize)
+        mem_gb = n_pixels_x * n_pixels_y * 4 / (1024**3)  # float32
+        raise ValueError(
+            f"Merged extent ({extent_x_km:.0f} km x {extent_y_km:.0f} km) exceeds "
+            f"maximum allowed ({maxExtentKm} km). This would require ~{mem_gb:.1f} GiB. "
+            f"Likely cause: stale output files from a previous run with different DEM. "
+            f"Delete the cell's 3_SplitInputs directory and re-run."
         )
 
     return bounds, cellSize
