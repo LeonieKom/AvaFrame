@@ -623,6 +623,78 @@ def mergeRasters(rasterFiles, bounds, mergeMethod="max"):
     return mergedHeader, mergedData
 
 
+def _is_simulation_dem_clipped(peakFile, min_run_px=20):
+    """Check whether a simulation was clipped at the DEM boundary by inspecting
+    its peak-file raster.
+
+    **Physical principle**: when a simulation is clipped at the DEM edge, the
+    avalanche has non-zero pressure right up to the last row or column of the
+    raster — it would have continued beyond the domain but was artificially
+    stopped.  The result is a straight-line artefact in the merged raster.
+
+    By contrast, a simulation that naturally stops inside the DEM (valley floor,
+    loss of momentum) has *no* valid data pixels at the raster border.  This is
+    because ``com1DFA`` writes PPR rasters with a bounding box that matches the
+    last non-zero pixel, not the full DEM extent.  A "natural stop" may have a
+    bounding box that touches the DEM boundary (the raster origin aligns with a
+    DEM grid corner), but its last pixel row/column will be zero.
+
+    The test: find the longest run of consecutive valid-data pixels (value > 0
+    and != nodata) in any of the four border rows/columns.  If this run is at
+    least ``min_run_px`` pixels long, the simulation is flagged as clipped.
+    The minimum-run threshold avoids false positives from isolated pixels that
+    touch the edge due to numerical noise.
+
+    Parameters
+    ----------
+    peakFile : pathlib.Path or str
+        Path to the individual peak-file raster (e.g. ``individual_8_..._ppr.tif``).
+    min_run_px : int, optional
+        Minimum consecutive valid-pixel run length at the raster border required
+        to flag the simulation as clipped.  Default is 20 (= 100 m at 5 m
+        resolution).  Short runs (< 100 m) are unlikely to produce visible
+        straight-line artefacts in the merged output.
+
+    Returns
+    -------
+    bool
+        ``True`` if the simulation appears to be DEM-clipped, ``False`` otherwise.
+        Returns ``False`` on any read error so that uncertain files are kept.
+    """
+    try:
+        with rasterio.open(peakFile) as src:
+            data = src.read(1)
+            nodata = src.nodata
+    except Exception as exc:
+        log.debug("_is_simulation_dem_clipped: could not read %s: %s", peakFile, exc)
+        return False
+
+    if nodata is not None:
+        valid = (data > 0) & (data != nodata)
+    else:
+        valid = data > 0
+
+    def _max_run(arr):
+        """Longest consecutive True run in a 1-D boolean array."""
+        run = max_run = 0
+        for v in arr:
+            if v:
+                run += 1
+                if run > max_run:
+                    max_run = run
+            else:
+                run = 0
+        return max_run
+
+    # Check the single outermost row/column on all four sides
+    return (
+        _max_run(valid[0, :])   >= min_run_px or   # north border
+        _max_run(valid[-1, :])  >= min_run_px or   # south border
+        _max_run(valid[:, 0])   >= min_run_px or   # west border
+        _max_run(valid[:, -1])  >= min_run_px       # east border
+    )
+
+
 def mergeOutputRasters(cfg, avalancheDir):
     """Merge output rasters (peakFiles) from all avalanche simulations.
 
@@ -679,21 +751,72 @@ def mergeOutputRasters(cfg, avalancheDir):
     print(f"STEP 4/4: Merging rasters ({len(mergeTypes)} types)")
     print(f"{'='*70}\n")
     
+    # Pre-compute which simulations are DEM-clipped (once, shared across all rasterTypes).
+    #
+    # Detection: a simulation whose PPR raster has consecutive valid-data pixels
+    # (pressure > 0) reaching the very last row or column of the raster was
+    # artificially stopped at the DEM boundary.  The avalanche would have
+    # continued beyond the domain — this produces a straight-line artefact in the
+    # merged output.  By contrast, a natural stop inside the DEM leaves the border
+    # row/column empty (com1DFA crops to the data bounding box, so the last pixel
+    # of a natural stop carries no pressure).
+    #
+    # We use PPR as the reference type because it is always produced.  The same
+    # avaDir is then excluded for ALL raster types (ppr, pfv, pft) for consistency.
+    clipped_avaDirs = set()
+    reference_type = "ppr"
+
+    # Step 1: flag each avaDir whose PPR raster has valid-data pixels at the
+    # raster border.  This is the definitive sign that the avalanche reached the
+    # DEM boundary and was artificially stopped (= clipped), causing a
+    # straight-line artefact in the merged output.
+    #
+    # A minimum run of 20 pixels (= 100 m at 5 m resolution) is required to
+    # distinguish real clipping from isolated border pixels caused by numerical
+    # noise.  Runs shorter than 100 m are unlikely to produce visible artefacts.
+    for avaDir in avaDirs:
+        peakFilesDir = avaDir / "Outputs" / "com1DFA" / "peakFiles"
+        if not peakFilesDir.is_dir():
+            continue
+        ref_files = list(peakFilesDir.glob(f"*_{reference_type}.*"))
+        for ref_file in ref_files:
+            if _is_simulation_dem_clipped(ref_file, min_run_px=20):
+                clipped_avaDirs.add(avaDir)
+                break
+
+    if clipped_avaDirs:
+        log.warning(
+            "DEM-clip filter: excluding %d of %d simulation directories whose avalanche "
+            "reached the DEM boundary (straight-line artefact suppression).",
+            len(clipped_avaDirs), len(avaDirs)
+        )
+        print(f"\n  [CLIP FILTER] Excluding {len(clipped_avaDirs)}/{len(avaDirs)} "
+              f"DEM-clipped simulations from merge.")
+    else:
+        log.info("DEM-clip filter: no clipped simulations detected.")
+
     for rasterType in mergeTypes:
         # Find all files of this type across all avalanche directories
         print(f"\n  [{rasterType.upper()}] Collecting raster files...")
         rasterFiles = []
+        n_excluded = 0
         for avaDir in avaDirs:
+            if avaDir in clipped_avaDirs:
+                n_excluded += 1
+                continue
             peakFilesDir = avaDir / "Outputs" / "com1DFA" / "peakFiles"
             if peakFilesDir.is_dir():
                 rasterFiles.extend(list(peakFilesDir.glob(f"*_{rasterType}.*")))
+
+        if n_excluded:
+            print(f"  [{rasterType.upper()}] Excluded {n_excluded} DEM-clipped simulations.")
 
         if not rasterFiles:
             print(f"  [{rasterType.upper()}] WARNING: No rasters found to merge")
             log.warning(f"No {rasterType} rasters found to merge")
             continue
 
-        print(f"  [{rasterType.upper()}] Found {len(rasterFiles)} rasters")
+        print(f"  [{rasterType.upper()}] Found {len(rasterFiles)} rasters ({n_excluded} excluded as DEM-clipped)")
 
         # Get bounds and validate cell sizes (now parallelized!)
         print(f"  [{rasterType.upper()}] Reading raster headers...")
