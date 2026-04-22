@@ -850,27 +850,25 @@ def mergeOutputRasters(cfg, avalancheDir):
             # Fix header nodata_value to match filled data (-9999)
             mergedHeader["nodata_value"] = -9999.0
 
-            # Strip the outermost 50 m (10 pixels at 5 m resolution) from the
-            # merged raster on all four sides.  com1DFA deposits particle mass
-            # in a thin strip at the DEM boundary when particles lose SPH
-            # neighbours on the outer side, producing a characteristic
-            # straight-line artifact in the merged output.  The strip is always
-            # within the overlap zone between neighbouring tiles (≥ 2 km), so
-            # the regional MAX merge will fill the masked pixels with correct
-            # values from the neighbour tile.  This also ensures that the
-            # avalanche track exporter (which uses this cell-level PPR) does
-            # not inherit the artifact geometry.
-            _strip_margin_m = 50.0
-            _csz = mergedHeader.get("cellsize", 5.0)
-            _margin_px = max(1, int(math.ceil(_strip_margin_m / _csz)))
-            _nd = mergedHeader.get("nodata_value", -9999.0)
-            if mergedData.ndim == 2:
-                _nr, _nc = mergedData.shape
-                if _nr > 2 * _margin_px and _nc > 2 * _margin_px:
-                    mergedData[:_margin_px, :]  = _nd
-                    mergedData[-_margin_px:, :] = _nd
-                    mergedData[:, :_margin_px]  = _nd
-                    mergedData[:, -_margin_px:] = _nd
+            # Secondary safeguard (PPR only): strip the outermost 50 m from
+            # the merged PPR on all four sides.  The primary fix is the
+            # boundary-exit flag exclusion above (Step 1a/1b).  This strip
+            # covers any residual pressure accumulation from simulations that
+            # ran before the flag mechanism existed and were not caught by the
+            # pixel-based fallback.  Only applied to PPR — PFV and PFT do not
+            # exhibit the pressure-accumulation artifact.
+            if rasterType == "ppr":
+                _strip_margin_m = 50.0
+                _csz = mergedHeader.get("cellsize", 5.0)
+                _margin_px = max(1, int(math.ceil(_strip_margin_m / _csz)))
+                _nd = mergedHeader.get("nodata_value", -9999.0)
+                if mergedData.ndim == 2:
+                    _nr, _nc = mergedData.shape
+                    if _nr > 2 * _margin_px and _nc > 2 * _margin_px:
+                        mergedData[:_margin_px, :]  = _nd
+                        mergedData[-_margin_px:, :] = _nd
+                        mergedData[:, :_margin_px]  = _nd
+                        mergedData[:, -_margin_px:] = _nd
             print(f"  [{rasterType.upper()}] Writing merged raster...")
             
             # Apply uint16 compression for PPR if output is GeoTIFF
