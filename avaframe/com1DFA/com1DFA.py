@@ -2191,9 +2191,18 @@ def DFAIterate(cfg, particles, fields, dem, inputSimLines, outDir, cuSimName, si
         countParticleCsv = countParticleCsv + 1
 
     if particles["nExitedParticles"] != 0.0:
-        log.debug(
-            "%d particles have been removed during simulation because they exited the domain"
-            % particles["nExitedParticles"]
+        log.warning(
+            "BOUNDARY EXIT: %d particles exited the DEM domain during simulation '%s'. "
+            "The PPR raster for this simulation may show artificial pressure accumulation "
+            "near the DEM boundary and will be excluded from the cell-level merge."
+            % (particles["nExitedParticles"], cuSimName)
+        )
+        # Write a flag file next to the peak files so that mergeOutputRasters
+        # can detect and skip this simulation when building the cell-level PPR.
+        flagPath = outDir / "peakFiles" / ("%s_BOUNDARY_EXIT.flag" % cuSimName)
+        fU.makeADir(outDir / "peakFiles")
+        flagPath.write_text(
+            "nExitedParticles=%d\nsimName=%s\n" % (int(particles["nExitedParticles"]), cuSimName)
         )
 
     return Tsave, infoDict, contourDictXY

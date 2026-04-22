@@ -767,15 +767,34 @@ def mergeOutputRasters(cfg, avalancheDir):
     clipped_avaDirs = set()
     reference_type = "ppr"
 
-    # Step 1: flag each avaDir whose PPR raster has valid-data pixels at the
-    # raster border.  This is the definitive sign that the avalanche reached the
-    # DEM boundary and was artificially stopped (= clipped), causing a
-    # straight-line artefact in the merged output.
-    #
-    # A minimum run of 20 pixels (= 100 m at 5 m resolution) is required to
-    # distinguish real clipping from isolated border pixels caused by numerical
-    # noise.  Runs shorter than 100 m are unlikely to produce visible artefacts.
+    # Step 1a: fast flag-file check — com1DFA writes a *_BOUNDARY_EXIT.flag
+    # file to the peakFiles directory whenever nExitedParticles > 0.  This is
+    # the authoritative indicator that particles left the domain and that the
+    # PPR raster carries artificial boundary-accumulation pressure.
+    n_flag = 0
     for avaDir in avaDirs:
+        peakFilesDir = avaDir / "Outputs" / "com1DFA" / "peakFiles"
+        if not peakFilesDir.is_dir():
+            continue
+        if list(peakFilesDir.glob("*_BOUNDARY_EXIT.flag")):
+            clipped_avaDirs.add(avaDir)
+            n_flag += 1
+
+    if n_flag:
+        log.warning(
+            "BOUNDARY EXIT flags: %d simulation directories had particles exit the DEM. "
+            "These will be excluded from the merge.",
+            n_flag,
+        )
+        print(f"\n  [BOUNDARY FILTER] {n_flag} simulations excluded via _BOUNDARY_EXIT.flag")
+
+    # Step 1b: pixel-based fallback check for simulations that ran before the
+    # flag-file mechanism was introduced (legacy results without flag files).
+    # Flag each avaDir whose PPR raster has valid-data pixels at the
+    # raster border — a minimum run of 20 pixels (100 m at 5 m) is required.
+    for avaDir in avaDirs:
+        if avaDir in clipped_avaDirs:
+            continue  # already flagged above
         peakFilesDir = avaDir / "Outputs" / "com1DFA" / "peakFiles"
         if not peakFilesDir.is_dir():
             continue
