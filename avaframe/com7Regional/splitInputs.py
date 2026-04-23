@@ -569,6 +569,20 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
         # Clip the DEM data (numpy slicing is very fast)
         clippedData = raster[rowStart:rowEnd, colStart:colEnd].copy()  # copy to avoid memory issues
 
+        # Handle nodata values: Convert original nodata and 0 values to np.nan
+        # This ensures they are properly written as nodata in the output raster
+        originalNoData = header.get("nodata_value", -9999)
+        if np.isnan(originalNoData):
+            originalNoData = -9999  # fallback if somehow nan got stored
+
+        # Mask both original nodata values and 0 values as invalid (set to nan)
+        # 0 values at DEM edges are artifacts from clipping beyond original DEM extent
+        invalid_mask = (clippedData == originalNoData) | (clippedData == 0)
+        if np.any(invalid_mask):
+            clippedData = clippedData.astype(np.float32)  # ensure float for nan support
+            clippedData[invalid_mask] = np.nan
+            log.debug(f"{dirName}: Masked {np.sum(invalid_mask)} invalid pixels (nodata/0) as nan")
+
         # Create header for clipped DEM
         clippedHeader = header.copy()
         clippedHeader["ncols"] = colEnd - colStart
@@ -576,6 +590,7 @@ def clipDEMByReleaseGroup(dirList, inputDEM, outputDir, cfg, parallel=True, max_
         clippedHeader["xllcenter"] = xOrigin + colStart * cellSize
         clippedHeader["yllcenter"] = yOrigin + rowStart * cellSize
         clippedHeader["transform"] = rasterUtils.transformFromASCHeader(clippedHeader)
+        clippedHeader["nodata_value"] = np.nan  # np.nan will be converted to -9999 by writeResultToRaster
 
         # Track pixel savings for directional clipping
         if useDirectional:
